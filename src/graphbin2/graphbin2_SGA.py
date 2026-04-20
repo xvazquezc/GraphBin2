@@ -49,15 +49,17 @@ def run(args):
     # -----------------------
     logger = logging.getLogger(f"GraphBin2 {__version__}")
     logger.setLevel(logging.DEBUG)
-    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-    consoleHeader = logging.StreamHandler()
-    consoleHeader.setFormatter(formatter)
-    consoleHeader.setLevel(logging.INFO)
-    logger.addHandler(consoleHeader)
+    if not logger.handlers:
+        formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+        consoleHeader = logging.StreamHandler()
+        consoleHeader.setFormatter(formatter)
+        consoleHeader.setLevel(logging.INFO)
+        logger.addHandler(consoleHeader)
 
     # Setup output path for log file
     # ---------------------------------------------------
 
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
     fileHandler = logging.FileHandler(f"{output_path}/{prefix}graphbin2.log")
     fileHandler.setLevel(logging.DEBUG)
     fileHandler.setFormatter(formatter)

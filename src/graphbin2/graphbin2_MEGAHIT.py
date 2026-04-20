@@ -49,15 +49,17 @@ def run(args):
     # -----------------------
     logger = logging.getLogger(f"GraphBin2 {__version__}")
     logger.setLevel(logging.DEBUG)
-    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-    consoleHeader = logging.StreamHandler()
-    consoleHeader.setFormatter(formatter)
-    consoleHeader.setLevel(logging.INFO)
-    logger.addHandler(consoleHeader)
+    if not logger.handlers:
+        formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+        consoleHeader = logging.StreamHandler()
+        consoleHeader.setFormatter(formatter)
+        consoleHeader.setLevel(logging.INFO)
+        logger.addHandler(consoleHeader)
 
     # Setup output path for log file
     # ---------------------------------------------------
 
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
     fileHandler = logging.FileHandler(f"{output_path}/{prefix}graphbin2.log")
     fileHandler.setLevel(logging.DEBUG)
     fileHandler.setFormatter(formatter)
@@ -259,7 +261,7 @@ def run(args):
         with open(contig_bins_file) as contig_bins:
             readCSV = csv.reader(contig_bins, delimiter=delimiter)
             for row in readCSV:
-                contig_num = contigs_map_rev[int(graph_to_contig_map_rev[row[0]])]
+                contig_num = contigs_map_rev[int(graph_to_contig_map_rev[row[0].split()[0]])]
 
                 bin_num = bins_list.index(row[1])
                 bins[bin_num].append(contig_num)
