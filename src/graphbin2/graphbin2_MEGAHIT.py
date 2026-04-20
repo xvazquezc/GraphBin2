@@ -69,7 +69,7 @@ def run(args):
         "Welcome to GraphBin2: Refined and Overlapped Binning of Metagenomic Contigs using Assembly Graphs."
     )
     logger.info(
-        "This version of GraphBin2 makes use of the assembly graph produced by MEGATHI which is based on the de Bruijn graph approach."
+        "This version of GraphBin2 makes use of the assembly graph produced by MEGAHIT which is based on the de Bruijn graph approach."
     )
 
     logger.info(f"Input arguments:")
@@ -340,8 +340,7 @@ def run(args):
                         contig_bin,
                         depth[active_node],
                         abs(
-                            coverages[contigs_map[node]]
-                            - coverages[contigs_map[active_node]]
+                            coverages[node] - coverages[active_node]
                         ),
                     )
                 )
@@ -415,7 +414,7 @@ def run(args):
                         if (
                             max_index != my_contig_bin
                             and BFS_labelled_bin_counts[max_index] > 1
-                            and contig_lengths[contigs_map[my_node]] < 10000
+                            and contig_lengths[my_node] < 10000
                         ):
                             remove_labels[my_node] = my_contig_bin
 
@@ -661,11 +660,8 @@ def run(args):
     for i in range(n_bins):
         for j in range(len(bins[i])):
             if bins[i][j] in non_isolated:
-                bin_cov_sum[i] += (
-                    coverages[contigs_map[bins[i][j]]]
-                    * contig_lengths[contigs_map[bins[i][j]]]
-                )
-                bin_contig_len_total[i] += contig_lengths[contigs_map[bins[i][j]]]
+                bin_cov_sum[i] += coverages[bins[i][j]] * contig_lengths[bins[i][j]]
+                bin_contig_len_total[i] += contig_lengths[bins[i][j]]
 
     mapped = [None for itr in range(node_count)]
 
@@ -738,8 +734,9 @@ def run(args):
 
     # Add contigs to multiplt bins
     for contig, min_diff_combination in multi_bins:
+        contig_label = graph_to_contig_map.get(contigs_map[contig], str(contigs_map[contig]))
         logger.info(
-            contig_names[contig]
+            contig_label
             + " belongs to bins "
             + ", ".join(bins_list[s] for s in min_diff_combination)
         )
@@ -760,7 +757,7 @@ def run(args):
     # Write result to output file
     # -----------------------------------
 
-    logger.info("fWriting the final binning results to file")
+    logger.info(f"Writing the final binning results to file")
 
     output_bins = []
 
@@ -846,10 +843,10 @@ def is_multi(
         bin_contig_lengths = list(bin_contig_len_total)
 
         bin_coverages[contig_bin] = bin_coverages[contig_bin] - (
-            coverages[contigs_map[contig]] * contig_lengths[contigs_map[contig]]
+            coverages[contig] * contig_lengths[contig]
         )
         bin_contig_lengths[contig_bin] = (
-            bin_contig_lengths[contig_bin] - contig_lengths[contigs_map[contig]]
+            bin_contig_lengths[contig_bin] - contig_lengths[contig]
         )
 
         for i in range(n_bins):
@@ -867,7 +864,7 @@ def is_multi(
             for n in range(n_bins):
                 if neighbour in bins[n]:
                     neighbour_bins[n].append(neighbour)
-                    neighbour_bin_coverages[n].append(coverages[contigs_map[neighbour]])
+                    neighbour_bin_coverages[n].append(coverages[neighbour])
                     break
 
         zero_bin_count = 0
@@ -896,7 +893,7 @@ def is_multi(
                 for i in range(len(combination)):
                     comb_cov_total += bin_coverages[combination[i]]
 
-                cov_diff = abs(comb_cov_total - coverages[contigs_map[contig]])
+                cov_diff = abs(comb_cov_total - coverages[contig])
 
                 if cov_diff < min_diff:
                     min_diff = cov_diff
@@ -905,7 +902,7 @@ def is_multi(
             if (
                 min_diff_combination != -1
                 and len(min_diff_combination) > 1
-                and contig_lengths[contigs_map[contig]] > 1000
+                and contig_lengths[contig] > 1000
             ):
                 # return True
                 return contig, min_diff_combination
