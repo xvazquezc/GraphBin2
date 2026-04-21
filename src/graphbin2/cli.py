@@ -181,14 +181,6 @@ def main(
     consoleHeader.setLevel(logging.INFO)
     logger.addHandler(consoleHeader)
 
-    # Setup output path for log file
-    # ---------------------------------------------------
-
-    fileHandler = logging.FileHandler(f"{output_path}/{prefix}graphbin2.log")
-    fileHandler.setLevel(logging.DEBUG)
-    fileHandler.setFormatter(formatter)
-    logger.addHandler(fileHandler)
-
     # Validation of inputs
     # ---------------------------------------------------
 
@@ -227,42 +219,6 @@ def main(
         logger.error("Please enter a valid number for the number of threads")
         logger.info("Exiting GraphBin2...\nBye...!\n")
         sys.exit(1)
-
-    # Start GraphBin2
-    # ---------------------------------------------------
-
-    logger.info(
-        "Welcome to GraphBin2: Refined and Overlapped Binning of Metagenomic Contigs using Assembly Graphs."
-    )
-
-    if assembler.lower() == "spades":
-        logger.info(
-            "This version of GraphBin2 makes use of the assembly graph produced by SPAdes which is based on the de Bruijn graph approach."
-        )
-    elif assembler.lower() == "megahit":
-        logger.info(
-            "This version of GraphBin2 makes use of the assembly graph produced by MEGAHIT which is based on the de Bruijn graph approach."
-        )
-    elif assembler.lower() == "sga":
-        logger.info(
-            "This version of GraphBin2 makes use of the assembly graph produced by SGA which is based on the string graph approach."
-        )
-    elif assembler.lower() == "flye":
-        logger.info(
-            "This version of GraphBin2 makes use of the assembly graph produced by metaFlye which is a long reads assembler based on the de Bruijn graph approach."
-        )
-
-    logger.info("Input arguments:")
-    logger.info(f"Contigs file: {contigs_file}")
-    logger.info(f"Assembly graph file: {assembly_graph_file}")
-    logger.info(f"Contig paths file: {contig_paths}")
-    logger.info(f"Existing binning output file: {contig_bins_file}")
-    logger.info(f"Final binning output file: {output_path}")
-    logger.info(f"Depth: {depth}")
-    logger.info(f"Threshold: {threshold}")
-    logger.info(f"Number of threads: {nthreads}")
-
-    logger.info("GraphBin2 started")
 
     # Make args object
     args = ArgsObj(
