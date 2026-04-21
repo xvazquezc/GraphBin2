@@ -545,13 +545,6 @@ def run(args):
     # Initialise progress bar
     pbar = tqdm(total=len(non_isolated_unbinned))
 
-    class DataWrap:
-        def __init__(self, data):
-            self.data = data
-
-        def __lt__(self, other):
-            return (self.data[3], self.data[-1]) < (other.data[3], other.data[-1])
-
     contigs_to_bin = set()
 
     for contig in binned_contigs:
@@ -562,17 +555,23 @@ def run(args):
             )
             contigs_to_bin.update(closest_neighbours)
 
+    # Improvement 4: heap entries are plain (dist, cov_diff, to_bin, src, bin_) tuples;
+    # Python's native tuple comparison replaces the DataWrap wrapper class.
     sorted_node_list = []
-    sorted_node_list_ = [list(runBFS(x, threhold=depth)) for x in contigs_to_bin]
-    sorted_node_list_ = [item for sublist in sorted_node_list_ for item in sublist]
+    for x in contigs_to_bin:
+        for nd, src, bin__, bfs_dist, cov_diff in runBFS(x, threhold=depth):
+            heapq.heappush(sorted_node_list, (bfs_dist, cov_diff, nd, src, bin__))
 
-    for data in sorted_node_list_:
-        heapObj = DataWrap(data)
-        heapq.heappush(sorted_node_list, heapObj)
-
+    # Improvement 1: lazy-deletion drain — the filter+heapify block is removed.
+    # Stale entries (already-assigned nodes) are discarded at pop-time by the
+    # `if to_bin in non_isolated_unbinned` set-membership check (O(1)).
+    #
+    # Improvement 2: when a node is assigned, its direct unbinned neighbours get a
+    # single distance-1 candidate pushed directly from the just-assigned node, instead
+    # of a full runBFS call. Any path to those neighbours from previously-labelled nodes
+    # is already in the heap, so this push supplies the only new information.
     while sorted_node_list:
-        best_choice = heapq.heappop(sorted_node_list)
-        to_bin, binned, bin_, dist, cov_diff = best_choice.data
+        bfs_dist, cov_diff, to_bin, src, bin_ = heapq.heappop(sorted_node_list)
 
         if to_bin in non_isolated_unbinned:
             bins[bin_].add(to_bin)
@@ -584,22 +583,11 @@ def run(args):
             # Update progress bar
             pbar.update(1)
 
-            # Discover to_bin's neighbours
-            unbinned_neighbours = set(
-                filter(
-                    lambda x: x not in binned_contigs,
-                    assembly_graph.neighbors(to_bin, mode=ALL),
-                )
-            )
-            sorted_node_list = list(
-                filter(lambda x: x.data[0] not in unbinned_neighbours, sorted_node_list)
-            )
-            heapq.heapify(sorted_node_list)
-
-            for n in unbinned_neighbours:
-                candidates = list(runBFS(n, threhold=depth))
-                for c in candidates:
-                    heapq.heappush(sorted_node_list, DataWrap(c))
+            # Push distance-1 candidates for newly reachable unbinned neighbours.
+            for n in assembly_graph.neighbors(to_bin, mode=ALL):
+                if n not in binned_contigs:
+                    cov_d = abs(coverages.get(n, 0) - coverages.get(to_bin, 0))
+                    heapq.heappush(sorted_node_list, (1, cov_d, n, to_bin, bin_))
 
     # Close progress bar
     pbar.close()
