@@ -11,7 +11,8 @@ import subprocess
 import sys
 import time
 
-from collections import defaultdict
+import multiprocessing
+from collections import defaultdict, deque
 
 from cogent3.parse.fasta import MinimalFastaParser
 from igraph import *
@@ -26,6 +27,15 @@ __version__ = "1.3.3"
 __maintainer__ = "Vijini Mallawaarachchi"
 __email__ = "viji.mallawaarachchi@gmail.com"
 __status__ = "Stable Release"
+
+# Shared state for ProcessPoolExecutor workers (fork-inherited on Linux).
+_is_multi_kwargs: dict = {}
+
+
+def _is_multi_worker(n: int):
+    """Module-level worker callable for ProcessPoolExecutor."""
+    return is_multi(contig=n, **_is_multi_kwargs)
+
 
 def run(args):
     # Get arguments
@@ -305,7 +315,7 @@ def run(args):
     # Get initial binning result
     # ----------------------------
 
-    bins = [[] for x in range(n_bins)]
+    bins = [set() for x in range(n_bins)]
 
     try:
         with open(contig_bins_file) as contig_bins:
@@ -314,10 +324,7 @@ def run(args):
                 contig_num = contig_names_rev[row[0]]
 
                 bin_num = bins_list.index(row[1])
-                bins[bin_num].append(contig_num)
-
-        for i in range(n_bins):
-            bins[i].sort()
+                bins[bin_num].add(contig_num)
 
     except BaseException as err:
         logger.error(f"Unexpected {err}")
@@ -330,19 +337,14 @@ def run(args):
     # Get binned and unbinned contigs
     # -----------------------------------------------------
 
-    binned_contigs = []
-
+    binned_contigs = set()
     for n in range(n_bins):
-        binned_contigs = sorted(binned_contigs + bins[n])
+        binned_contigs.update(bins[n])
 
-    unbinned_contigs = []
+    unbinned_contigs = set(range(node_count)) - binned_contigs
 
-    for i in range(node_count):
-        if i not in binned_contigs:
-            unbinned_contigs.append(i)
-
-    binned_contigs.sort()
-    unbinned_contigs.sort()
+    # Reverse map: contig_id → bin index for O(1) lookup throughout
+    contig_bin_map = {c: n for n in range(n_bins) for c in bins[n]}
 
     logger.info(f"No. of binned contigs: {len(binned_contigs)}")
     logger.info(f"No. of unbinned contigs: {len(unbinned_contigs)}")
@@ -350,49 +352,42 @@ def run(args):
     # Get isolated vertices
     # -----------------------------------------------------
 
-    isolated = []
+    isolated = set()
 
     for i in range(node_count):
         neighbours = assembly_graph.neighbors(i, mode=ALL)
 
         if len(neighbours) == 0:
-            isolated.append(i)
+            isolated.add(i)
 
     # The BFS function to search labelled nodes
     # -----------------------------------------------------
 
     def runBFS(node, threhold=depth):
-        queue = []
+        queue = deque([node])
         visited = set()
-        queue.append(node)
         depth = {}
 
         depth[node] = 0
 
         labelled_nodes = set()
 
-        while len(queue) > 0:
-            active_node = queue.pop(0)
+        while queue:
+            active_node = queue.popleft()
             visited.add(active_node)
 
             if active_node in binned_contigs and len(visited) > 1:
-                contig_bin = -1
-
-                # Get the bin of the current contig
-                for n in range(n_bins):
-                    if active_node in bins[n]:
-                        contig_bin = n
-                        break
-
-                labelled_nodes.add(
-                    (
-                        node,
-                        active_node,
-                        contig_bin,
-                        depth[active_node],
-                        abs(coverages[node] - coverages[active_node]),
+                contig_bin = contig_bin_map.get(active_node, -1)
+                if contig_bin != -1:
+                    labelled_nodes.add(
+                        (
+                            node,
+                            active_node,
+                            contig_bin,
+                            depth[active_node],
+                            abs(coverages.get(node, 0) - coverages.get(active_node, 0)),
+                        )
                     )
-                )
 
             else:
                 for neighbour in assembly_graph.neighbors(active_node, mode=ALL):
@@ -421,13 +416,7 @@ def run(args):
 
         for my_node in binned_contigs:
             if my_node not in isolated:
-                my_contig_bin = -1
-
-                # Get the bin of the current contig
-                for n in range(n_bins):
-                    if my_node in bins[n]:
-                        my_contig_bin = n
-                        break
+                my_contig_bin = contig_bin_map.get(my_node, -1)
 
                 BFS_labelled_nodes = list(runBFS(my_node))
 
@@ -463,7 +452,7 @@ def run(args):
                         if (
                             max_index != my_contig_bin
                             and BFS_labelled_bin_counts[max_index] > 1
-                            and contig_lengths[my_node] < 10000
+                            and contig_lengths.get(my_node, 10000) < 10000
                         ):
                             remove_labels[my_node] = my_contig_bin
 
@@ -477,9 +466,10 @@ def run(args):
             break
         else:
             for contig in remove_labels:
-                bins[remove_labels[contig]].remove(contig)
-                binned_contigs.remove(contig)
-                unbinned_contigs.append(contig)
+                bins[remove_labels[contig]].discard(contig)
+                binned_contigs.discard(contig)
+                unbinned_contigs.add(contig)
+                contig_bin_map.pop(contig, None)
 
         iter_num += 1
 
@@ -490,7 +480,7 @@ def run(args):
 
     iter_num = 1
 
-    once_moved = []
+    once_moved = set()
 
     while True:
         logger.debug(f"Iteration: {iter_num}")
@@ -502,13 +492,7 @@ def run(args):
 
         for my_node in binned_contigs:
             if my_node not in isolated and my_node not in once_moved:
-                my_contig_bin = -1
-
-                # Get the bin of the current contig
-                for n in range(n_bins):
-                    if my_node in bins[n]:
-                        my_contig_bin = n
-                        break
+                my_contig_bin = contig_bin_map.get(my_node, -1)
 
                 BFS_labelled_nodes = list(runBFS(my_node))
 
@@ -555,7 +539,7 @@ def run(args):
 
                 if should_move and max_weight_bin != -1:
                     contigs_to_correct[my_node] = (my_contig_bin, max_weight_bin)
-                    once_moved.append(my_node)
+                    once_moved.add(my_node)
 
             # Update progress bar
             pbar.update(1)
@@ -569,9 +553,9 @@ def run(args):
             for contig in contigs_to_correct:
                 old_bin = contigs_to_correct[contig][0]
                 new_bin = contigs_to_correct[contig][1]
-                bins[old_bin].remove(contig)
-                bins[new_bin].append(contig)
-                bins[new_bin].sort()
+                bins[old_bin].discard(contig)
+                bins[new_bin].add(contig)
+                contig_bin_map[contig] = new_bin
 
         iter_num += 1
 
@@ -582,51 +566,18 @@ def run(args):
     # Initialise progress bar
     pbar = tqdm(total=node_count)
 
-    non_isolated = []
-
-    for i in range(node_count):
-        if i not in non_isolated and i in binned_contigs:
-            component = []
-            component.append(i)
-            length = len(component)
-            neighbours = assembly_graph.neighbors(i, mode=ALL)
-
-            for neighbor in neighbours:
-                if neighbor not in component:
-                    component.append(neighbor)
-
-            component = list(set(component))
-
-            while length != len(component):
-                length = len(component)
-
-                for j in component:
-                    neighbours = assembly_graph.neighbors(j, mode=ALL)
-
-                    for neighbor in neighbours:
-                        if neighbor not in component:
-                            component.append(neighbor)
-
-            labelled = False
-            for j in component:
-                if j in binned_contigs:
-                    labelled = True
-                    break
-
-            if labelled:
-                for j in component:
-                    if j not in non_isolated:
-                        non_isolated.append(j)
-
-        # Update progress bar
-        pbar.update(1)
-
-    # Close progress bar
+    non_isolated_set = set()
+    for component in assembly_graph.connected_components():
+        if any(m in binned_contigs for m in component):
+            non_isolated_set.update(component)
+        pbar.update(len(component))
     pbar.close()
+
+    non_isolated = list(non_isolated_set)
 
     logger.info(f"Number of non-isolated contigs: {len(non_isolated)}")
 
-    non_isolated_unbinned = list(set(non_isolated).intersection(set(unbinned_contigs)))
+    non_isolated_unbinned = non_isolated_set.intersection(unbinned_contigs)
 
     logger.info(
         f"Number of non-isolated unbinned contigs: {len(non_isolated_unbinned)}"
@@ -640,17 +591,10 @@ def run(args):
     # Initialise progress bar
     pbar = tqdm(total=len(non_isolated_unbinned))
 
-    class DataWrap:
-        def __init__(self, data):
-            self.data = data
-
-        def __lt__(self, other):
-            return (self.data[3], self.data[-1]) < (other.data[3], other.data[-1])
-
     contigs_to_bin = set()
 
     for contig in binned_contigs:
-        if contig in non_isolated:
+        if contig in non_isolated_set:
             closest_neighbours = filter(
                 lambda x: x not in binned_contigs,
                 assembly_graph.neighbors(contig, mode=ALL),
@@ -658,42 +602,28 @@ def run(args):
             contigs_to_bin.update(closest_neighbours)
 
     sorted_node_list = []
-    sorted_node_list_ = [list(runBFS(x, threhold=depth)) for x in contigs_to_bin]
-    sorted_node_list_ = [item for sublist in sorted_node_list_ for item in sublist]
-
-    for data in sorted_node_list_:
-        heapObj = DataWrap(data)
-        heapq.heappush(sorted_node_list, heapObj)
+    for x in contigs_to_bin:
+        for nd, src, bin__, bfs_dist, cov_diff in runBFS(x, threhold=depth):
+            heapq.heappush(sorted_node_list, (bfs_dist, cov_diff, nd, src, bin__))
 
     while sorted_node_list:
-        best_choice = heapq.heappop(sorted_node_list)
-        to_bin, binned, bin_, dist, cov_diff = best_choice.data
+        bfs_dist, cov_diff, to_bin, src, bin_ = heapq.heappop(sorted_node_list)
 
         if to_bin in non_isolated_unbinned:
-            bins[bin_].append(to_bin)
-            binned_contigs.append(to_bin)
-            non_isolated_unbinned.remove(to_bin)
-            unbinned_contigs.remove(to_bin)
+            bins[bin_].add(to_bin)
+            binned_contigs.add(to_bin)
+            non_isolated_unbinned.discard(to_bin)
+            unbinned_contigs.discard(to_bin)
+            contig_bin_map[to_bin] = bin_
 
             # Update progress bar
             pbar.update(1)
 
-            # Discover to_bin's neighbours
-            unbinned_neighbours = set(
-                filter(
-                    lambda x: x not in binned_contigs,
-                    assembly_graph.neighbors(to_bin, mode=ALL),
-                )
-            )
-            sorted_node_list = list(
-                filter(lambda x: x.data[0] not in unbinned_neighbours, sorted_node_list)
-            )
-            heapq.heapify(sorted_node_list)
-
-            for n in unbinned_neighbours:
-                candidates = list(runBFS(n, threhold=depth))
-                for c in candidates:
-                    heapq.heappush(sorted_node_list, DataWrap(c))
+            # Push distance-1 candidates for newly reachable unbinned neighbours.
+            for n in assembly_graph.neighbors(to_bin, mode=ALL):
+                if n not in binned_contigs:
+                    cov_d = abs(coverages.get(n, 0) - coverages.get(to_bin, 0))
+                    heapq.heappush(sorted_node_list, (1, cov_d, n, to_bin, bin_))
 
     # Close progress bar
     pbar.close()
@@ -707,68 +637,40 @@ def run(args):
     bin_contig_len_total = [0 for x in range(n_bins)]
 
     for i in range(n_bins):
-        for j in range(len(bins[i])):
-            if bins[i][j] in non_isolated:
-                bin_cov_sum[i] += coverages[bins[i][j]] * contig_lengths[bins[i][j]]
-                bin_contig_len_total[i] += contig_lengths[bins[i][j]]
+        for contig in bins[i]:
+            if contig in non_isolated_set:
+                node_cov = coverages.get(contig, 0)
+                node_len = contig_lengths.get(contig, 0)
+                bin_cov_sum[i] += node_cov * node_len
+                bin_contig_len_total[i] += node_len
 
     mapped = [None for itr in range(node_count)]
 
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=nthreads)
-
-    # Thread function
-    def thread_function(
-        n,
-        non_isolated,
-        binned_contigs,
-        n_bins,
-        bins,
-        bin_cov_sum,
-        bin_contig_len_total,
-        coverages,
-        contig_lengths,
-        assembly_graph,
-    ):
-        bin_result = is_multi(
-            contig=n,
-            non_isolated=non_isolated,
-            binned_contigs=binned_contigs,
-            n_bins=n_bins,
-            bins=bins,
-            bin_cov_sum=bin_cov_sum,
-            bin_contig_len_total=bin_contig_len_total,
-            coverages=coverages,
-            contig_lengths=contig_lengths,
-            assembly_graph=assembly_graph,
-        )
-        mapped[n] = bin_result
-
-    # Set up execution args for thread function
-    exec_args = []
-
-    for n in range(node_count):
-        exec_args.append(
-            (
-                n,
-                non_isolated,
-                binned_contigs,
-                n_bins,
-                bins,
-                bin_cov_sum,
-                bin_contig_len_total,
-                coverages,
-                contig_lengths,
-                assembly_graph,
+    # Set up shared state for worker processes (fork-inherited on Linux)
+    global _is_multi_kwargs
+    _is_multi_kwargs = dict(
+        non_isolated=non_isolated_set,
+        binned_contigs=binned_contigs,
+        n_bins=n_bins,
+        bins=bins,
+        bin_cov_sum=bin_cov_sum,
+        bin_contig_len_total=bin_contig_len_total,
+        coverages=coverages,
+        contig_lengths=contig_lengths,
+        assembly_graph=assembly_graph,
+        contig_bin_map=contig_bin_map,
+    )
+    chunksize = max(1, node_count // (nthreads * 4))
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=nthreads,
+        mp_context=multiprocessing.get_context("fork"),
+    ) as executor:
+        mapped = list(
+            tqdm(
+                executor.map(_is_multi_worker, range(node_count), chunksize=chunksize),
+                total=node_count,
             )
         )
-
-    # Thread executor
-    for itr in tqdm(
-        executor.map(lambda p: thread_function(*p), exec_args), total=node_count
-    ):
-        pass
-
-    executor.shutdown(wait=True)
 
     multi_bins = list(filter(lambda x: x is not None, mapped))
 
@@ -785,18 +687,13 @@ def run(args):
             + ", ".join(bins_list[s] for s in min_diff_combination)
         )
         for mybin in min_diff_combination:
-            if contig not in bins[mybin]:
-                bins[mybin].append(contig)
+            bins[mybin].add(contig)
 
     # Determine elapsed time
     elapsed_time = time.time() - start_time
 
     # Show elapsed time for the process
     logger.info(f"Elapsed time: {elapsed_time} seconds")
-
-    # Sort contigs in bins
-    for i in range(n_bins):
-        bins[i].sort()
 
     # Write result to output file
     # -----------------------------------
@@ -833,13 +730,9 @@ def run(args):
     for bin_num in range(n_bins):
         bin_files[bins_list[bin_num]].close()
 
-    for i in range(node_count):
-        for k in range(n_bins):
-            if i in bins[k]:
-                line = []
-                line.append(contig_names[i])
-                line.append(bins_list[k])
-                output_bins.append(line)
+    for k in range(n_bins):
+        for contig in bins[k]:
+            output_bins.append([contig_names[contig], bins_list[k]])
 
     output_file = f"{output_path}{prefix}graphbin2_output.csv"
 
@@ -870,25 +763,25 @@ def is_multi(
     coverages,
     contig_lengths,
     assembly_graph,
+    contig_bin_map=None,
 ):
     if contig in non_isolated and contig in binned_contigs:
-        contig_bin = -1
-
-        # Get the bin of the current contig
-        for n in range(n_bins):
-            if contig in bins[n]:
-                contig_bin = n
-                break
+        contig_bin = contig_bin_map.get(contig, -1) if contig_bin_map is not None else -1
+        if contig_bin == -1:
+            for n in range(n_bins):
+                if contig in bins[n]:
+                    contig_bin = n
+                    break
 
         # Get average coverage of each connected component representing a bin excluding the contig
         bin_coverages = list(bin_cov_sum)
         bin_contig_lengths = list(bin_contig_len_total)
 
         bin_coverages[contig_bin] = bin_coverages[contig_bin] - (
-            coverages[contig] * contig_lengths[contig]
+            coverages.get(contig, 0) * contig_lengths.get(contig, 0)
         )
         bin_contig_lengths[contig_bin] = (
-            bin_contig_lengths[contig_bin] - contig_lengths[contig]
+            bin_contig_lengths[contig_bin] - contig_lengths.get(contig, 0)
         )
 
         for i in range(n_bins):
@@ -903,11 +796,15 @@ def is_multi(
         neighbours = assembly_graph.neighbors(contig, mode=ALL)
 
         for neighbour in neighbours:
-            for n in range(n_bins):
-                if neighbour in bins[n]:
-                    neighbour_bins[n].append(neighbour)
-                    neighbour_bin_coverages[n].append(coverages[neighbour])
-                    break
+            nb = contig_bin_map.get(neighbour, -1) if contig_bin_map is not None else -1
+            if nb == -1:
+                for n in range(n_bins):
+                    if neighbour in bins[n]:
+                        nb = n
+                        break
+            if nb != -1:
+                neighbour_bins[nb].append(neighbour)
+                neighbour_bin_coverages[nb].append(coverages.get(neighbour, 0))
 
         zero_bin_count = 0
 
@@ -935,7 +832,7 @@ def is_multi(
                 for i in range(len(combination)):
                     comb_cov_total += bin_coverages[combination[i]]
 
-                cov_diff = abs(comb_cov_total - coverages[contig])
+                cov_diff = abs(comb_cov_total - coverages.get(contig, 0))
 
                 if cov_diff < min_diff:
                     min_diff = cov_diff
@@ -944,7 +841,7 @@ def is_multi(
             if (
                 min_diff_combination != -1
                 and len(min_diff_combination) > 1
-                and contig_lengths[contig] > 1000
+                and contig_lengths.get(contig, 0) > 1000
             ):
                 # return True
                 return contig, min_diff_combination

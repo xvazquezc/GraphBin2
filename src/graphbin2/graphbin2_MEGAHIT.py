@@ -521,7 +521,7 @@ def run(args):
     pbar = tqdm(total=node_count)
 
     non_isolated_set = set()
-    for component in assembly_graph.clusters():
+    for component in assembly_graph.connected_components():
         if any(m in binned_contigs for m in component):
             non_isolated_set.update(component)
         pbar.update(len(component))
